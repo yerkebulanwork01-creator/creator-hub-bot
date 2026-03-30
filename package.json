@@ -1,0 +1,5 @@
+{
+  "name": "creator-hub-bot",
+  "private": true,
+  "workspaces": ["backend", "mini-app"]
+}
