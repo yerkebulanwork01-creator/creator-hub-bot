@@ -1,10 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import * as api from './utils/api.js';
 
-/* ═══════════════════════════════════════════════════════════════
-   STYLES
-   ═══════════════════════════════════════════════════════════════ */
 const CSS = `
 :root{--bg:#0e0e0e;--s1:#181818;--s2:#222;--bd:#2a2a2a;--t1:#eee;--t2:#888;--gr:#4ade80;--rd:#ef4444;--or:#f59e0b;--bl:#3b82f6;--vi:#a78bfa}
 *{margin:0;padding:0;box-sizing:border-box}
@@ -59,13 +56,11 @@ body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;backgrou
 .load{text-align:center;padding:40px;color:var(--t2)}
 .tabs{display:flex;gap:4px;margin-bottom:14px;overflow-x:auto}
 textarea.inp{min-height:80px;resize:vertical;font-family:inherit}
+.label{font-size:13px;color:var(--t2);margin-bottom:6px;display:block}
 `;
 
 const tg = () => window.Telegram?.WebApp;
 
-/* ═══════════════════════════════════════════════════════════════
-   APP
-   ═══════════════════════════════════════════════════════════════ */
 export default function App() {
   const [page, setPage] = useState('loading');
   const [user, setUser] = useState(null);
@@ -84,19 +79,26 @@ export default function App() {
       const t = tg();
       const initData = t?.initData;
       if (!initData) {
-        // Dev mode
         setUser({ firstName: 'Dev', lastName: 'Mode', role: 'SUPERADMIN' });
         setPart({ id: 'dev', cohort: 'Тест', city: 'Астана', totalPoints: 42, events: [] });
         setPage('home');
         return;
       }
       const r = await api.authTelegram(initData);
-      api.setToken(r.token);
-      setUser(r.user);
-      if (r.user.participant) { setPart(r.user.participant); setPage('home'); }
-      else if (['ADMIN','SUPERADMIN'].includes(r.user.role)) setPage('admin');
-      else setPage('link');
-    } catch (e) { setErr(e.message); setPage('link'); }
+      if (r.needsRegistration) {
+        setPage('register');
+        return;
+      }
+      if (r.token) {
+        api.setToken(r.token);
+        setUser(r.user);
+        if (r.user.participant) { setPart(r.user.participant); setPage('home'); }
+        else if (['ADMIN','SUPERADMIN'].includes(r.user.role)) setPage('admin');
+        else setPage('register');
+      } else {
+        setPage('register');
+      }
+    } catch (e) { setErr(e.message); setPage('register'); }
   }
 
   async function refresh() {
@@ -114,7 +116,7 @@ export default function App() {
 
   const P = {
     loading: <div className="load">Жүктелуде...</div>,
-    link: <LinkPage onOk={(u,p)=>{setUser(u);setPart(p);setPage('home')}} err={err} />,
+    register: <RegisterPage onOk={(u,p)=>{setUser(u);setPart(p);setPage('home')}} err={err} />,
     home: <HomePage user={user} part={part} onRefresh={refresh} />,
     qr: <QrPage part={part} />,
     history: <HistoryPage />,
@@ -125,7 +127,7 @@ export default function App() {
   return (
     <div className="app">
       {P[page] || <div className="load">?</div>}
-      {page !== 'loading' && page !== 'link' && (
+      {page !== 'loading' && page !== 'register' && (
         <nav className="nav"><div className="nav-in">
           {nav.map(n => (
             <button key={n.id} className={`nav-b ${page===n.id?'on':''}`} onClick={()=>setPage(n.id)}>
@@ -138,49 +140,86 @@ export default function App() {
   );
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   LINK PAGE — Аккаунт привязкасы
-   ═══════════════════════════════════════════════════════════════ */
-function LinkPage({ onOk, err: initErr }) {
-  const [code, setCode] = useState('');
+/* ═══ ТІРКЕЛУ БЕТІ ═══ */
+function RegisterPage({ onOk, err: initErr }) {
+  const [iin, setIin] = useState('');
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
+  const [phone, setPhone] = useState('');
+  const [city, setCity] = useState('');
   const [loading, setLoading] = useState(false);
   const [err, setErr] = useState(initErr);
 
   async function handle() {
-    if (!code.trim()) return;
+    if (!iin.trim() || !firstName.trim() || !lastName.trim()) {
+      setErr('ИИН, аты және тегі міндетті');
+      return;
+    }
+    if (!/^\d{12}$/.test(iin.trim())) {
+      setErr('ИИН 12 саннан тұруы керек');
+      return;
+    }
     setLoading(true); setErr(null);
     try {
-      const r = await api.linkAccount(tg()?.initData || '', code.trim());
-      api.setToken(r.token);
-      onOk(r.user, r.participant);
+      const t = tg();
+      const res = await fetch(
+        (import.meta.env.VITE_API_URL || '') + '/api/auth/register',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            initData: t?.initData || '',
+            iin: iin.trim(),
+            firstName: firstName.trim(),
+            lastName: lastName.trim(),
+            phone: phone.trim() || null,
+            city: city.trim() || null,
+          }),
+        }
+      );
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || 'Қате');
+      api.setToken(data.token);
+      onOk(data.user, data.participant);
     } catch (e) { setErr(e.message); }
     setLoading(false);
   }
 
   return (
-    <div style={{paddingTop:60,textAlign:'center'}}>
-      <div style={{fontSize:48,marginBottom:16}}>🎓</div>
-      <h2 style={{marginBottom:8}}>Аккаунт привязкасы</h2>
-      <p style={{color:'var(--t2)',marginBottom:24,fontSize:13}}>
-        Тіркеу кезінде берілген кодты енгізіңіз
-      </p>
+    <div style={{paddingTop:30}}>
+      <div style={{textAlign:'center',marginBottom:24}}>
+        <div style={{fontSize:48,marginBottom:12}}>🎓</div>
+        <h2 style={{marginBottom:6}}>Тіркелу</h2>
+        <p style={{color:'var(--t2)',fontSize:13}}>Қатысушы ретінде тіркеліңіз</p>
+      </div>
       {err && <div className="err">{err}</div>}
-      <input className="inp" placeholder="Код (мыс. CH-001)" value={code}
-        onChange={e=>setCode(e.target.value)} onKeyDown={e=>e.key==='Enter'&&handle()} />
+      <label className="label">ИИН *</label>
+      <input className="inp" placeholder="123456789012" value={iin}
+        onChange={e=>setIin(e.target.value.replace(/\D/g,'').slice(0,12))}
+        inputMode="numeric" maxLength={12} />
+      <label className="label">Аты *</label>
+      <input className="inp" placeholder="Айдос" value={firstName}
+        onChange={e=>setFirstName(e.target.value)} />
+      <label className="label">Тегі *</label>
+      <input className="inp" placeholder="Қасымов" value={lastName}
+        onChange={e=>setLastName(e.target.value)} />
+      <label className="label">Телефон</label>
+      <input className="inp" placeholder="+7 700 123 4567" value={phone}
+        onChange={e=>setPhone(e.target.value)} inputMode="tel" />
+      <label className="label">Қала</label>
+      <input className="inp" placeholder="Астана" value={city}
+        onChange={e=>setCity(e.target.value)} />
       <button className="btn btn-g" onClick={handle} disabled={loading}>
-        {loading ? 'Тексерілуде...' : 'Байланыстыру'}
+        {loading ? 'Тіркелуде...' : 'Тіркелу'}
       </button>
     </div>
   );
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   HOME — Басты бет
-   ═══════════════════════════════════════════════════════════════ */
+/* ═══ БАСТЫ БЕТ ═══ */
 function HomePage({ user, part, onRefresh }) {
   useEffect(() => { onRefresh(); }, []);
   const g = grade(part?.totalPoints);
-
   return <>
     <div className="card">
       <div className="card-h">Профиль</div>
@@ -219,9 +258,7 @@ function grade(pts = 0) {
   return { n:'—', c:'var(--t2)' };
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   QR PAGE — Динамикалық QR
-   ═══════════════════════════════════════════════════════════════ */
+/* ═══ QR ═══ */
 function QrPage({ part }) {
   const [payload, setPayload] = useState(null);
   const [selEv, setSelEv] = useState(null);
@@ -239,10 +276,7 @@ function QrPage({ part }) {
     return () => { clearInterval(timer.current); clearTimeout(refresh.current); };
   }, []);
 
-  async function pickEvent(ev) {
-    setSelEv(ev);
-    await genQr(ev.id);
-  }
+  async function pickEvent(ev) { setSelEv(ev); await genQr(ev.id); }
 
   async function genQr(eventId) {
     try {
@@ -288,25 +322,18 @@ function QrPage({ part }) {
         <div className="qr-timer"><span className="dot"/>{sec} сек кейін жаңарады</div>
       </> : <div className="load">QR құрылуда...</div>}
     </div>
-    <p style={{textAlign:'center',color:'var(--t2)',fontSize:12,marginTop:6}}>
-      Осы кодты админге көрсетіңіз
-    </p>
+    <p style={{textAlign:'center',color:'var(--t2)',fontSize:12,marginTop:6}}>Осы кодты админге көрсетіңіз</p>
   </>;
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   HISTORY — Журнал
-   ═══════════════════════════════════════════════════════════════ */
+/* ═══ ЖУРНАЛ ═══ */
 function HistoryPage() {
   const [logs, setLogs] = useState([]);
   const [loading, setLoading] = useState(true);
-
   useEffect(() => {
     api.getMyAttendance().then(d => setLogs(d.logs||[])).catch(()=>{}).finally(()=>setLoading(false));
   }, []);
-
   if (loading) return <div className="load">Жүктелуде...</div>;
-
   return (
     <div className="card">
       <div className="card-h">Посещаемость журналы</div>
@@ -317,29 +344,22 @@ function HistoryPage() {
             <div style={{fontWeight:600,fontSize:14}}>{l.event?.title||'Мероприятие'}</div>
             <div style={{fontSize:12,color:'var(--t2)'}}>{new Date(l.scannedAt).toLocaleString('kk-KZ')}</div>
           </div>
-          <span className={`badge ${l.action==='CHECK_IN'?'bg':'bo'}`}>
-            {l.action==='CHECK_IN'?'Кіру':'Шығу'}
-          </span>
+          <span className={`badge ${l.action==='CHECK_IN'?'bg':'bo'}`}>{l.action==='CHECK_IN'?'Кіру':'Шығу'}</span>
         </div>
       ))}
     </div>
   );
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   POINTS — Баллдар
-   ═══════════════════════════════════════════════════════════════ */
+/* ═══ БАЛЛДАР ═══ */
 function PointsPage() {
   const [data, setData] = useState({ total: 0, history: [] });
   const [loading, setLoading] = useState(true);
-
   useEffect(() => {
     api.getMyPoints().then(setData).catch(()=>{}).finally(()=>setLoading(false));
   }, []);
-
   if (loading) return <div className="load">Жүктелуде...</div>;
   const g = grade(data.total);
-
   return <>
     <div className="stats">
       <div className="stat"><b>{data.total}</b><small>Жалпы балл</small></div>
@@ -369,9 +389,7 @@ function PointsPage() {
   </>;
 }
 
-/* ═══════════════════════════════════════════════════════════════
-   ADMIN — Сканер + Рассылка + Отчёт
-   ═══════════════════════════════════════════════════════════════ */
+/* ═══ АДМИН ═══ */
 function AdminPage() {
   const [tab, setTab] = useState('scan');
   const [events, setEvents] = useState([]);
@@ -388,7 +406,6 @@ function AdminPage() {
     api.getDashboard().then(setDash).catch(()=>{});
   }, []);
 
-  // ─── QR Сканер ──────────────────────────────────
   function startScan() {
     const t = tg();
     if (t?.showScanQrPopup) {
@@ -410,38 +427,29 @@ function AdminPage() {
   async function confirmScan(action) {
     try {
       await api.scanAttendance({
-        participantId: scanRes.participant.id,
-        eventId: scanRes.eventId,
-        action,
-        nonce: scanRes.nonce,
+        participantId: scanRes.participant.id, eventId: scanRes.eventId,
+        action, nonce: scanRes.nonce,
       });
       setScanRes(p => ({ ...p, done: true, doneAction: action }));
-      // Вибрация
       tg()?.HapticFeedback?.notificationOccurred('success');
     } catch (e) { setScanErr(e.message); }
   }
 
-  // ─── Отчёт ─────────────────────────────────────
   async function loadReport(eventId) {
-    try { setReport(await api.getEventReport(eventId)); }
-    catch (e) { setScanErr(e.message); }
+    try { setReport(await api.getEventReport(eventId)); } catch (e) { setScanErr(e.message); }
   }
 
-  // ─── Рассылка ──────────────────────────────────
   async function sendBroadcast() {
     if (!msg.trim()) return;
     try {
       const r = await api.broadcast({ message: msg, eventId: selEv?.id });
-      setBroadcastOk(r.message);
-      setMsg('');
+      setBroadcastOk(r.message); setMsg('');
     } catch (e) { setScanErr(e.message); }
   }
 
   const tabs = [
-    { id:'scan', l:'📷 Сканер' },
-    { id:'report', l:'📊 Отчёт' },
-    { id:'broadcast', l:'📢 Рассылка' },
-    { id:'dash', l:'📈 Сводка' },
+    { id:'scan', l:'📷 Сканер' }, { id:'report', l:'📊 Отчёт' },
+    { id:'broadcast', l:'📢 Рассылка' }, { id:'dash', l:'📈 Сводка' },
   ];
 
   return <>
@@ -452,7 +460,6 @@ function AdminPage() {
       ))}
     </div>
 
-    {/* ── Сканер ── */}
     {tab === 'scan' && <>
       {!selEv ? (
         <div className="card">
@@ -500,7 +507,6 @@ function AdminPage() {
       )}
     </>}
 
-    {/* ── Отчёт ── */}
     {tab === 'report' && <>
       {!report ? (
         <div className="card">
@@ -540,7 +546,6 @@ function AdminPage() {
       )}
     </>}
 
-    {/* ── Рассылка ── */}
     {tab === 'broadcast' && (
       <div className="card">
         <div className="card-h">📢 Бұқаралық хабарлама</div>
@@ -559,7 +564,6 @@ function AdminPage() {
       </div>
     )}
 
-    {/* ── Dashboard ── */}
     {tab === 'dash' && dash && (
       <div>
         <div className="stats">
