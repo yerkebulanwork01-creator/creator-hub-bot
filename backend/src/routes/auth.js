@@ -1,110 +1,90 @@
-import { Router } from 'express';
-import { PrismaClient } from '@prisma/client';
-import { validateInitData } from '../utils/telegram-auth.js';
-import { createToken } from '../middleware/auth.js';
+const BASE = import.meta.env.VITE_API_URL || '';
+let token = localStorage.getItem('chub_token');
 
-const router = Router();
-const prisma = new PrismaClient();
+export const setToken = (t) => {
+  token = t;
+  localStorage.setItem('chub_token', t);
+};
 
-const SUPERADMIN_IDS = (process.env.SUPERADMIN_IDS || '')
-  .split(',').map(id => parseInt(id.trim())).filter(Boolean);
+export const clearToken = () => {
+  token = null;
+  localStorage.removeItem('chub_token');
+};
 
-// POST /api/auth/telegram — Telegram арқылы кіру
-router.post('/telegram', async (req, res) => {
+async function req(path, opts = {}) {
+  const url = `${BASE}/api${path}`;
+  console.log('API REQUEST:', url, opts);
+
+  const res = await fetch(url, {
+    ...opts,
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token && { Authorization: `Bearer ${token}` }),
+      ...opts.headers,
+    },
+  });
+
+  const raw = await res.text();
+  console.log('API RESPONSE:', url, res.status, raw);
+
+  let data = {};
   try {
-    const { initData } = req.body;
-    if (!initData) return res.status(400).json({ error: 'initData қажет' });
-
-    const v = validateInitData(initData);
-    if (!v.valid) return res.status(401).json({ error: v.error });
-
-    const telegramId = BigInt(v.user.id);
-    const isSuperadmin = SUPERADMIN_IDS.includes(v.user.id);
-
-    let user = await prisma.user.findUnique({
-      where: { telegramId },
-      include: { participant: true },
-    });
-
-    if (!user) {
-      user = await prisma.user.create({
-        data: {
-          telegramId,
-          firstName: v.user.firstName,
-          lastName: v.user.lastName,
-          username: v.user.username,
-          role: isSuperadmin ? 'SUPERADMIN' : 'PARTICIPANT',
-        },
-        include: { participant: true },
-      });
-    } else {
-      user = await prisma.user.update({
-        where: { telegramId },
-        data: {
-          firstName: v.user.firstName,
-          lastName: v.user.lastName,
-          username: v.user.username,
-          ...(isSuperadmin && { role: 'SUPERADMIN' }),
-        },
-        include: { participant: true },
-      });
-    }
-
-    const token = createToken(user);
-    res.json({
-      token,
-      user: { ...user, telegramId: Number(user.telegramId) },
-    });
-  } catch (err) {
-    console.error('Auth error:', err);
-    res.status(500).json({ error: 'Авторизация қатесі' });
+    data = raw ? JSON.parse(raw) : {};
+  } catch {
+    throw new Error(`JSON емес жауап: ${raw.slice(0, 200)}`);
   }
-});
 
-// POST /api/auth/link — Регистрация кодымен привязка
-router.post('/link', async (req, res) => {
-  try {
-    const { initData, registrationId } = req.body;
-    if (!initData || !registrationId) {
-      return res.status(400).json({ error: 'initData және registrationId қажет' });
-    }
+  if (!res.ok) throw new Error(data.error || 'Қате');
+  return data;
+}
 
-    const v = validateInitData(initData);
-    if (!v.valid) return res.status(401).json({ error: v.error });
+export const authTelegram = (initData) =>
+  req('/auth/telegram', {
+    method: 'POST',
+    body: JSON.stringify({ initData }),
+  });
 
-    const participant = await prisma.participant.findUnique({
-      where: { externalRegistrationId: registrationId.trim() },
-      include: { user: true },
-    });
+export const linkAccount = (initData, regId) =>
+  req('/auth/link', {
+    method: 'POST',
+    body: JSON.stringify({ initData, registrationId: regId }),
+  });
 
-    if (!participant) {
-      return res.status(404).json({ error: 'Код табылмады. Тексеріңіз.' });
-    }
-    if (participant.isLinked) {
-      return res.status(409).json({ error: 'Бұл код басқа аккаунтқа тіркелген' });
-    }
+export const getProfile = () => req('/participants/me');
+export const getMyEvents = () => req('/participants/me/events');
+export const getMyPoints = () => req('/participants/me/points');
+export const getMyAttendance = () => req('/attendance/my');
 
-    const user = await prisma.user.update({
-      where: { id: participant.userId },
-      data: {
-        telegramId: BigInt(v.user.id),
-        firstName: v.user.firstName,
-        lastName: v.user.lastName,
-        username: v.user.username,
-      },
-    });
+export const generateQr = (eventId) =>
+  req('/qr/generate', {
+    method: 'POST',
+    body: JSON.stringify({ eventId }),
+  });
 
-    await prisma.participant.update({
-      where: { id: participant.id },
-      data: { isLinked: true },
-    });
+export const verifyQr = (payload) =>
+  req('/qr/verify', {
+    method: 'POST',
+    body: JSON.stringify({ payload }),
+  });
 
-    const token = createToken(user);
-    res.json({ token, user: { ...user, telegramId: Number(user.telegramId) }, participant });
-  } catch (err) {
-    console.error('Link error:', err);
-    res.status(500).json({ error: 'Привязка қатесі' });
-  }
-});
+export const scanAttendance = (d) =>
+  req('/attendance/scan', {
+    method: 'POST',
+    body: JSON.stringify(d),
+  });
 
-export default router;
+export const getEventReport = (id) => req(`/attendance/event/${id}`);
+export const getDashboard = () => req('/admin/dashboard');
+export const getAdminEvents = () => req('/admin/events');
+
+export const createEvent = (d) =>
+  req('/admin/events', {
+    method: 'POST',
+    body: JSON.stringify(d),
+  });
+
+export const broadcast = (d) =>
+  req('/admin/broadcast', {
+    method: 'POST',
+    body: JSON.stringify(d),
+  });
