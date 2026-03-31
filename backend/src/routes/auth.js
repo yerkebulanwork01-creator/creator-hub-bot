@@ -9,7 +9,7 @@ const prisma = new PrismaClient();
 const SUPERADMIN_IDS = (process.env.SUPERADMIN_IDS || '')
   .split(',').map(id => parseInt(id.trim())).filter(Boolean);
 
-// POST /api/auth/telegram — Telegram кіру
+// POST /api/auth/telegram
 router.post('/telegram', async (req, res) => {
   try {
     const { initData } = req.body;
@@ -37,6 +37,12 @@ router.post('/telegram', async (req, res) => {
         },
         include: { participant: true },
       });
+
+      // User бар, бірақ participant жоқ — тіркелу керек
+      if (!user.participant && !isSuperadmin && user.role === 'PARTICIPANT') {
+        return res.json({ token: null, user: null, needsRegistration: true });
+      }
+
       const token = createToken(user);
       return res.json({ token, user: { ...user, telegramId: Number(user.telegramId) } });
     }
@@ -62,15 +68,13 @@ router.post('/telegram', async (req, res) => {
   }
 });
 
-// POST /api/auth/register — Жаңа қатысушы тіркеу
+// POST /api/auth/register
 router.post('/register', async (req, res) => {
   try {
     const { initData, iin, firstName, lastName, phone, city } = req.body;
     if (!initData || !iin || !firstName || !lastName) {
       return res.status(400).json({ error: 'ИИН, аты, тегі міндетті' });
     }
-
-    // ИИН формат тексеру (12 сан)
     if (!/^\d{12}$/.test(iin)) {
       return res.status(400).json({ error: 'ИИН 12 саннан тұруы керек' });
     }
@@ -81,21 +85,52 @@ router.post('/register', async (req, res) => {
     const telegramId = BigInt(v.user.id);
 
     // Бұл ИИН тіркелген бе
-    const existingParticipant = await prisma.participant.findUnique({
+    const existingP = await prisma.participant.findUnique({
       where: { externalRegistrationId: iin },
     });
-    if (existingParticipant) {
+    if (existingP) {
       return res.status(409).json({ error: 'Бұл ИИН-мен тіркелген аккаунт бар' });
     }
 
-    // Бұл Telegram тіркелген бе
-    const existingUser = await prisma.user.findUnique({ where: { telegramId } });
-    if (existingUser) {
+    // Бұл Telegram-мен user бар ма
+    let user = await prisma.user.findUnique({
+      where: { telegramId },
+      include: { participant: true },
+    });
+
+    // User бар + participant бар = бұрын тіркелген
+    if (user && user.participant) {
       return res.status(409).json({ error: 'Сіз бұрын тіркелгенсіз' });
     }
 
-    // Жаңа user + participant құру
-    const user = await prisma.user.create({
+    // User бар, бірақ participant жоқ — participant қосу
+    if (user && !user.participant) {
+      await prisma.user.update({
+        where: { id: user.id },
+        data: { firstName, lastName, phone: phone || null },
+      });
+
+      const participant = await prisma.participant.create({
+        data: {
+          userId: user.id,
+          externalRegistrationId: iin,
+          city: city || null,
+          programName: 'Creator Hub',
+          isLinked: true,
+        },
+      });
+
+      user = await prisma.user.findUnique({
+        where: { id: user.id },
+        include: { participant: true },
+      });
+
+      const token = createToken(user);
+      return res.json({ token, user: { ...user, telegramId: Number(user.telegramId) }, participant });
+    }
+
+    // User жоқ — жаңадан жасау
+    user = await prisma.user.create({
       data: {
         telegramId,
         firstName,
@@ -116,11 +151,7 @@ router.post('/register', async (req, res) => {
     });
 
     const token = createToken(user);
-    res.json({
-      token,
-      user: { ...user, telegramId: Number(user.telegramId) },
-      participant: user.participant,
-    });
+    res.json({ token, user: { ...user, telegramId: Number(user.telegramId) }, participant: user.participant });
   } catch (err) {
     console.error('Register error:', err);
     res.status(500).json({ error: 'Тіркелу қатесі' });
