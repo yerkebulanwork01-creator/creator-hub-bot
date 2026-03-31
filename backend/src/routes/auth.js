@@ -1,90 +1,141 @@
-const BASE = import.meta.env.VITE_API_URL || '';
-let token = localStorage.getItem('chub_token');
+import { Router } from 'express';
+import { PrismaClient } from '@prisma/client';
+import { validateInitData } from '../utils/telegram-auth.js';
+import { createToken } from '../middleware/auth.js';
 
-export const setToken = (t) => {
-  token = t;
-  localStorage.setItem('chub_token', t);
-};
+const router = Router();
+const prisma = new PrismaClient();
 
-export const clearToken = () => {
-  token = null;
-  localStorage.removeItem('chub_token');
-};
+const SUPERADMIN_IDS = (process.env.SUPERADMIN_IDS || '')
+  .split(',')
+  .map(id => parseInt(id.trim(), 10))
+  .filter(Boolean);
 
-async function req(path, opts = {}) {
-  const url = `${BASE}/api${path}`;
-  console.log('API REQUEST:', url, opts);
-
-  const res = await fetch(url, {
-    ...opts,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token && { Authorization: `Bearer ${token}` }),
-      ...opts.headers,
-    },
-  });
-
-  const raw = await res.text();
-  console.log('API RESPONSE:', url, res.status, raw);
-
-  let data = {};
+// POST /api/auth/telegram — Telegram арқылы кіру
+router.post('/telegram', async (req, res) => {
   try {
-    data = raw ? JSON.parse(raw) : {};
-  } catch {
-    throw new Error(`JSON емес жауап: ${raw.slice(0, 200)}`);
+    console.log('TELEGRAM AUTH BODY:', req.body);
+
+    const { initData } = req.body;
+    if (!initData) {
+      console.log('TELEGRAM AUTH ERROR: initData missing');
+      return res.status(400).json({ error: 'initData қажет' });
+    }
+
+    const v = validateInitData(initData);
+    console.log('TELEGRAM AUTH VALIDATE:', v);
+
+    if (!v.valid) {
+      return res.status(401).json({ error: v.error || 'Telegram auth жарамсыз' });
+    }
+
+    const telegramId = BigInt(v.user.id);
+    const isSuperadmin = SUPERADMIN_IDS.includes(Number(v.user.id));
+
+    let user = await prisma.user.findUnique({
+      where: { telegramId },
+      include: { participant: true },
+    });
+
+    if (!user) {
+      user = await prisma.user.create({
+        data: {
+          telegramId,
+          firstName: v.user.firstName,
+          lastName: v.user.lastName,
+          username: v.user.username,
+          role: isSuperadmin ? 'SUPERADMIN' : 'PARTICIPANT',
+        },
+        include: { participant: true },
+      });
+    } else {
+      user = await prisma.user.update({
+        where: { telegramId },
+        data: {
+          firstName: v.user.firstName,
+          lastName: v.user.lastName,
+          username: v.user.username,
+          ...(isSuperadmin && { role: 'SUPERADMIN' }),
+        },
+        include: { participant: true },
+      });
+    }
+
+    const token = createToken(user);
+
+    return res.json({
+      token,
+      user: {
+        ...user,
+        telegramId: Number(user.telegramId),
+      },
+    });
+  } catch (err) {
+    console.error('AUTH TELEGRAM FATAL:', err);
+    return res.status(500).json({ error: 'Авторизация қатесі' });
   }
+});
 
-  if (!res.ok) throw new Error(data.error || 'Қате');
-  return data;
-}
+// POST /api/auth/link — Регистрация кодымен привязка
+router.post('/link', async (req, res) => {
+  try {
+    console.log('LINK AUTH BODY:', req.body);
 
-export const authTelegram = (initData) =>
-  req('/auth/telegram', {
-    method: 'POST',
-    body: JSON.stringify({ initData }),
-  });
+    const { initData, registrationId } = req.body;
+    if (!initData || !registrationId) {
+      console.log('LINK AUTH ERROR: initData or registrationId missing');
+      return res.status(400).json({ error: 'initData және registrationId қажет' });
+    }
 
-export const linkAccount = (initData, regId) =>
-  req('/auth/link', {
-    method: 'POST',
-    body: JSON.stringify({ initData, registrationId: regId }),
-  });
+    const v = validateInitData(initData);
+    console.log('LINK AUTH VALIDATE:', v);
 
-export const getProfile = () => req('/participants/me');
-export const getMyEvents = () => req('/participants/me/events');
-export const getMyPoints = () => req('/participants/me/points');
-export const getMyAttendance = () => req('/attendance/my');
+    if (!v.valid) {
+      return res.status(401).json({ error: v.error || 'Telegram auth жарамсыз' });
+    }
 
-export const generateQr = (eventId) =>
-  req('/qr/generate', {
-    method: 'POST',
-    body: JSON.stringify({ eventId }),
-  });
+    const participant = await prisma.participant.findUnique({
+      where: { externalRegistrationId: registrationId.trim() },
+      include: { user: true },
+    });
 
-export const verifyQr = (payload) =>
-  req('/qr/verify', {
-    method: 'POST',
-    body: JSON.stringify({ payload }),
-  });
+    if (!participant) {
+      return res.status(404).json({ error: 'Код табылмады. Тексеріңіз.' });
+    }
 
-export const scanAttendance = (d) =>
-  req('/attendance/scan', {
-    method: 'POST',
-    body: JSON.stringify(d),
-  });
+    if (participant.isLinked) {
+      return res.status(409).json({ error: 'Бұл код басқа аккаунтқа тіркелген' });
+    }
 
-export const getEventReport = (id) => req(`/attendance/event/${id}`);
-export const getDashboard = () => req('/admin/dashboard');
-export const getAdminEvents = () => req('/admin/events');
+    const user = await prisma.user.update({
+      where: { id: participant.userId },
+      data: {
+        telegramId: BigInt(v.user.id),
+        firstName: v.user.firstName,
+        lastName: v.user.lastName,
+        username: v.user.username,
+      },
+    });
 
-export const createEvent = (d) =>
-  req('/admin/events', {
-    method: 'POST',
-    body: JSON.stringify(d),
-  });
+    await prisma.participant.update({
+      where: { id: participant.id },
+      data: { isLinked: true },
+    });
 
-export const broadcast = (d) =>
-  req('/admin/broadcast', {
-    method: 'POST',
-    body: JSON.stringify(d),
-  });
+    const token = createToken(user);
+
+    return res.json({
+      token,
+      user: {
+        ...user,
+        telegramId: Number(user.telegramId),
+      },
+      participant,
+    });
+  } catch (err) {
+    console.error('AUTH LINK FATAL:', err);
+    return res.status(500).json({ error: 'Привязка қатесі' });
+  }
+});
+
+export default router;
