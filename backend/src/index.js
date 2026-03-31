@@ -11,43 +11,33 @@ import adminRoutes from './routes/admin.js';
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Middleware
 app.use(cors({ origin: process.env.MINI_APP_URL || '*', credentials: true }));
 app.use(express.json());
 
-// Health check
 app.get('/api/health', (_, res) => res.json({ status: 'ok', bot: 'Creator Hub Bot', time: new Date().toISOString() }));
 
-// Routes
 app.use('/api/auth', authRoutes);
 app.use('/api/qr', qrRoutes);
 app.use('/api/attendance', attendanceRoutes);
 app.use('/api/participants', participantRoutes);
 app.use('/api/admin', adminRoutes);
 
-// 404
 app.use((_, res) => res.status(404).json({ error: 'Endpoint табылмады' }));
 
-// Error handler
-app.use((err, req, res, next) => {
-  console.error('Server error:', err);
-  res.status(500).json({ error: 'Сервер қатесі' });
+app.listen(PORT, () => {
+  console.log('🚀 Сервер: http://localhost:' + PORT);
 });
 
-// Start
-async function start() {
-  if (process.env.BOT_TOKEN) {
+// Бот бөлек іске қосылады, қатесі серверді құлатпайды
+if (process.env.BOT_TOKEN) {
+  try {
     const bot = createBot(process.env.BOT_TOKEN);
-    bot.start();
+    bot.start({ drop_pending_updates: true }).catch(err => {
+      console.error('Bot error (ignored):', err.message);
+    });
     startNotificationSender(bot);
-    console.log('🤖 Creator Hub Bot іске қосылды');
-  } else {
-    console.warn('⚠️  BOT_TOKEN жоқ — бот іске қосылмады');
+    console.log('🤖 Bot іске қосылды');
+  } catch (err) {
+    console.error('Bot init error (ignored):', err.message);
   }
-
-  app.listen(PORT, () => {
-    console.log(`🚀 Сервер: http://localhost:${PORT}`);
-  });
 }
-
-start().catch(console.error);
